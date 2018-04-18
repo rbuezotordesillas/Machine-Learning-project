@@ -1,0 +1,483 @@
+---
+title: "new_project_visa"
+output: html_document
+---
+
+#libraries
+```{r}
+library(randomForest)
+library(party)
+library(dplyr)
+library(tidyr)
+library(sqldf)
+library(caret)
+library(glmnet)
+library(car)
+library(ROCR)
+library(e1071)
+library(gbm)
+library(class)
+library(MASS)
+library(readr)
+library(tree)
+library(readr)
+
+```
+
+#Load Data set
+```{r}
+h1b_kaggle <- read.csv("h1b_kaggle.csv", header=TRUE, stringsAsFactors = FALSE)
+```
+
+
+#Preprocessing data
+```{r}
+#find rows where conditions are true where CASE_STATUS is CERTIFIED, CERTIFIED-WITHDRAWN that is treated as CERTIFIED or DENIED in the year 2014, 2015 and 2016
+
+myData = filter(h1b_kaggle, h1b_kaggle$CASE_STATUS %in% c('CERTIFIED','DENIED', 'CERTIFIED-WITHDRAWN')  & (h1b_kaggle$YEAR == 2016 | h1b_kaggle$YEAR == 2015 | h1b_kaggle$YEAR == 2014))
+
+
+#Keep only complete cases
+myData = myData[complete.cases(myData),]
+
+h1bData = myData
+
+#Eliminate columns case#, employer, job title, long, lat
+h1bData[,c(1,3,5,10,11)]=NULL
+
+#Create a new column called worksite to keep only state
+h1bData=separate(data = h1bData, col = WORKSITE, into = c("CITY", "STATE"), sep = ",")
+
+#Create a new column to save occupations
+h1bData$occ=NA
+
+#Keep occupations containing the keyword and set the new occupation
+h1bData$occ[grep("engineer",h1bData$SOC_NAME, ignore.case = T)]="ENGINEER"
+h1bData$occ[grep("manager",h1bData$SOC_NAME, ignore.case = T)]="MANAGER"
+h1bData$occ[grep("technician",h1bData$SOC_NAME, ignore.case = T)]="TECHNICIAN"
+h1bData$occ[grep("teacher",h1bData$SOC_NAME, ignore.case = T)]="TEACHER"
+h1bData$occ[grep("executive",h1bData$SOC_NAME, ignore.case = T)]="EXECUTIVE"
+h1bData$occ[grep("accountant",h1bData$SOC_NAME, ignore.case = T)]="ACCOUNTANT"
+h1bData$occ[grep("actor",h1bData$SOC_NAME, ignore.case = T)]="ACTOR"
+h1bData$occ[grep("advertising",h1bData$SOC_NAME, ignore.case = T)]="ADVERTISING"
+h1bData$occ[grep("lawyer",h1bData$SOC_NAME, ignore.case = T)]="LAWYER"
+h1bData$occ[grep("financial",h1bData$SOC_NAME, ignore.case = T)]="FINANCIAL"
+h1bData$occ[grep("arquitect",h1bData$SOC_NAME, ignore.case = T)]="ARQUITECT"
+h1bData$occ[grep("programmer",h1bData$SOC_NAME, ignore.case = T)]="SOFTWARE"
+h1bData$occ[grep("software",h1bData$SOC_NAME, ignore.case = T)]="SOFTWARE"
+h1bData$occ[grep("computer",h1bData$SOC_NAME, ignore.case = T)]="SOFTWARE"
+h1bData$occ[grep("developer",h1bData$SOC_NAME, ignore.case = T)]="SOFTWARE"
+h1bData$occ[grep("analyst",h1bData$SOC_NAME, ignore.case = T)]="ANALYST"
+h1bData$occ[grep("scien",h1bData$SOC_NAME, ignore.case = T)]="SCIENTIST"
+h1bData$occ[grep("specialist",h1bData$SOC_NAME, ignore.case = T)]="SPECIALIST"
+h1bData$occ[grep("animal",h1bData$SOC_NAME, ignore.case = T)]="ANIMAL RELATED"
+h1bData$occ[grep("athlet",h1bData$SOC_NAME, ignore.case = T)]="ATHLETE"
+h1bData$occ[grep("cook",h1bData$SOC_NAME, ignore.case = T)]="COOK"
+h1bData$occ[grep("chef",h1bData$SOC_NAME, ignore.case = T)]="COOK"
+h1bData$occ[grep("admin",h1bData$SOC_NAME, ignore.case = T)]="ADMINISTRATIVE"
+
+#Eliminate columns SOC_NAME and CITY
+h1bData$SOC_NAME=NULL
+h1bData$CITY= NULL
+
+#Removing states with low count
+a=sqldf("select count(*) cc, STATE from 'h1bData' group by STATE")      
+b=sqldf("select * from a where cc>2000 AND STATE <> ' NA'")
+h1bData$STATE=ifelse(h1bData$STATE %in% b$STATE,h1bData$STATE,NA)         
+
+#Convert the dependent variable to binary
+h1bData$CASE_STATUS=ifelse(h1bData$CASE_STATUS %in% c("CERTIFIED-WITHDRAWN", "CERTIFIED"),"1","0")
+
+#Converting categorical variables into factors
+h1bData[,c(-3)]= lapply(h1bData[,c(-3)], as.factor)
+h1bData = h1bData[complete.cases(h1bData),]
+
+#Using years 2014 and 2015 as training and 2016 as test
+data.test = h1bData[0:557090, ]
+data.train = h1bData[557091:1522982,]
+data.test = data.test[, -4]
+data.train = data.train[, -4]
+```
+
+
+#LOGISTIC REGRESSION USING ALL PREDICTORS
+```{r}
+#Fitting the model on the training dataset
+h1bglm.train.fit =glm(CASE_STATUS~., family=binomial(link = logit), data = data.train)
+
+#Finding Prdicitons on Testing set
+prediction=predict(h1bglm.train.fit, newdata=data.test, type="response")
+View(prediction)
+
+#Threshold
+pred_class = vector()
+pred_class[prediction<0.5]=0
+pred_class[prediction>=0.5]=1
+
+#confusion matrix
+confusionMatrix(pred_class, data.test$CASE_STATUS,positive="1")
+#levels(data.test$CASE_STATUS)
+
+#ROC Curve
+pred = prediction(pred_class, data.test$CASE_STATUS)
+perf = performance(pred,"tpr","fpr")
+plot(perf)
+
+#Area Under the Curve
+auc.tmp = performance(pred,"auc");
+auc = as.numeric(auc.tmp@y.values)
+auc
+```
+
+#LOGISTIC REGRESSION USING ONLY FULL_TIME_POSITION AND PREVAILING_WAGE
+```{r}
+#Fitting the model on the training dataset
+h1bglm.train.fit =glm(CASE_STATUS~.-STATE-occ, family=binomial(link = logit), data = data.train)
+
+#Finding Prdicitons on Testing set
+prediction=predict(h1bglm.train.fit, newdata=data.test, type="response")
+
+#Threshold
+pred_class = vector()
+pred_class[prediction<0.5]=0
+pred_class[prediction>=0.5]=1
+
+#confusion matrix
+confusionMatrix(pred_class, data.test$CASE_STATUS,positive="1")
+
+#ROC Curve
+pred = prediction(pred_class, data.test$CASE_STATUS)
+perf = performance(pred,"tpr","fpr")
+plot(perf)
+
+#Area Under the Curve
+auc.tmp = performance(pred,"auc");
+auc = as.numeric(auc.tmp@y.values)
+auc
+```
+
+#LOGISTIC REGRESSION USING ONLY FULL_TIME_POSITION, PREVAILING_WAGE AND STATE
+```{r}
+#Fitting the model on the training dataset
+h1bglm.train.fit =glm(CASE_STATUS~.-occ, family=binomial(link = logit), data = data.train)
+
+#Finding Prdicitons on Testing set
+prediction=predict(h1bglm.train.fit, newdata=data.test, type="response")
+
+#Threshold
+pred_class = vector()
+pred_class[prediction<0.5]=0
+pred_class[prediction>=0.5]=1
+
+#confusion matrix
+confusionMatrix(pred_class, data.test$CASE_STATUS,positive="1")
+
+#ROC Curve
+pred = prediction(pred_class, data.test$CASE_STATUS)
+perf = performance(pred,"tpr","fpr")
+plot(perf)
+
+#Area Under the Curve
+auc.tmp = performance(pred,"auc");
+auc = as.numeric(auc.tmp@y.values)
+auc
+```
+
+#LOGISTIC REGRESSION USING ONLY FULL_TIME_POSITION, PREVAILING_WAGE AND OCCUPATION
+```{r}
+#Fitting the model on the training dataset
+h1bglm.train.fit =glm(CASE_STATUS~.-STATE, family=binomial(link = logit), data = data.train)
+
+#Finding Prdicitons on Testing set
+prediction=predict(h1bglm.train.fit, newdata=data.test, type="response")
+
+#Threshold
+pred_class = vector()
+pred_class[prediction<0.5]=0
+pred_class[prediction>=0.5]=1
+
+#confusion matrix
+confusionMatrix(pred_class, data.test$CASE_STATUS,positive="1")
+
+#ROC Curve
+pred = prediction(pred_class, data.test$CASE_STATUS)
+perf = performance(pred,"tpr","fpr")
+plot(perf)
+
+#Area Under the Curve
+auc.tmp = performance(pred,"auc");
+auc = as.numeric(auc.tmp@y.values)
+auc
+```
+
+#LDA USING USING ALL PREDICTORS
+```{r}
+lda.fit=lda(CASE_STATUS~., data=data.train)
+lda.predict = predict(lda.fit, data.test, type = "prob")
+confusionMatrix(lda.predict$class, data.test$CASE_STATUS,positive="1")
+```
+
+#LDA USING ONLY FULL_TIME_POSITION AND PREVAILING_WAGE
+```{r}
+lda.fit=lda(CASE_STATUS~.-STATE-occ, data=data.train)
+lda.predict = predict(lda.fit, data.test, type = "prob")
+confusionMatrix(lda.predict$class, data.test$CASE_STATUS,positive="1")
+```
+
+#LDA USING ONLY FULL_TIME_POSITION, PREVAILING_WAGE AND STATE
+```{r}
+lda.fit=lda(CASE_STATUS~.-STATE, data=data.train)
+lda.predict = predict(lda.fit, data.test, type = "prob")
+confusionMatrix(lda.predict$class, data.test$CASE_STATUS,positive="1")
+```
+
+#LDA USING ONLY FULL_TIME_POSITION, PREVAILING_WAGE AND OCCUPATION
+```{r}
+lda.fit=lda(CASE_STATUS~.-occ, data=data.train)
+lda.predict = predict(lda.fit, data.test, type = "prob")
+confusionMatrix(lda.predict$class, data.test$CASE_STATUS,positive="1")
+```
+
+
+#QDA USING USING ALL PREDICTORS
+```{r}
+qda.fit=qda(CASE_STATUS~., data=data.train)
+qda.predict = predict(qda.fit, data.test)
+View(qda.predict)
+confusionMatrix(qda.predict$class, data.test$CASE_STATUS,positive="1")
+```
+
+#QDA USING ONLY FULL_TIME_POSITION AND PREVAILING_WAGE
+```{r}
+lda.fit=lda(CASE_STATUS~.-STATE-occ, data=data.train)
+lda.predict = predict(lda.fit, data.test, type = "prob")
+confusionMatrix(lda.predict$class, data.test$CASE_STATUS,positive="1")
+```
+
+#QDA USING ONLY FULL_TIME_POSITION, PREVAILING_WAGE AND STATE
+```{r}
+lda.fit=lda(CASE_STATUS~.-STATE, data=data.train)
+lda.predict = predict(lda.fit, data.test, type = "prob")
+confusionMatrix(lda.predict$class, data.test$CASE_STATUS,positive="1")
+```
+
+#QDA USING ONLY FULL_TIME_POSITION, PREVAILING_WAGE AND OCCUPATION
+```{r}
+lda.fit=lda(CASE_STATUS~.-occ, data=data.train)
+lda.predict = predict(lda.fit, data.test, type = "prob")
+confusionMatrix(lda.predict$class, data.test$CASE_STATUS,positive="1")
+```
+
+#LOGISTIC REGRESSION USING ALL PREDICTORS and threshold 0.97
+```{r}
+#Fitting the model on the training dataset
+h1bglm.train.fit =glm(CASE_STATUS~., family=binomial(link = logit), data = data.train)
+
+#Finding Predicitons on Testing set
+prediction=predict(h1bglm.train.fit, newdata=data.test, type="response")
+
+#Threshold
+pred_class = vector()
+pred_class[prediction<0.97]=0
+pred_class[prediction>=0.97]=1
+
+##confusion matrix
+confusionMatrix(pred_class, data.test$CASE_STATUS,positive="1")
+
+#ROC Curve
+pred = prediction(pred_class, data.test$CASE_STATUS)
+perf = performance(pred,"tpr","fpr")
+plot(perf)
+
+#Area Under the Curve
+auc.tmp = performance(pred,"auc");
+auc = as.numeric(auc.tmp@y.values)
+auc
+```
+
+#LOGISTIC REGRESSION USING ONLY FULL_TIME_POSITION AND PREVAILING_WAGE
+```{r}
+#Fitting the model on the training dataset
+h1bglm.train.fit =glm(CASE_STATUS~.-STATE-occ, family=binomial(link = logit), data = data.train)
+
+#Finding Prdicitons on Testing set
+prediction=predict(h1bglm.train.fit, newdata=data.test, type="response")
+
+#Threshold
+pred_class = vector()
+pred_class[prediction<0.97]=0
+pred_class[prediction>=0.97]=1
+
+##confusion matrix
+confusionMatrix(pred_class, data.test$CASE_STATUS,positive="1")
+
+#ROC Curve
+pred = prediction(pred_class, data.test$CASE_STATUS)
+perf = performance(pred,"tpr","fpr")
+plot(perf)
+
+#Area Under the Curve
+auc.tmp = performance(pred,"auc");
+auc = as.numeric(auc.tmp@y.values)
+auc
+```
+
+#LOGISTIC REGRESSION USING ONLY FULL_TIME_POSITION, PREVAILING_WAGE AND STATE
+```{r}
+#Fitting the model on the training dataset
+h1bglm.train.fit =glm(CASE_STATUS~.-occ, family=binomial(link = logit), data = data.train)
+
+#Finding Prdicitons on Testing set
+prediction=predict(h1bglm.train.fit, newdata=data.test, type="response")
+
+#Threshold
+pred_class = vector()
+pred_class[prediction<0.97]=0
+pred_class[prediction>=0.97]=1
+
+##confusion matrix
+confusionMatrix(pred_class, data.test$CASE_STATUS,positive="1")
+
+#ROC Curve
+pred = prediction(pred_class, data.test$CASE_STATUS)
+perf = performance(pred,"tpr","fpr")
+plot(perf)
+
+#Area Under the Curve
+auc.tmp = performance(pred,"auc");
+auc = as.numeric(auc.tmp@y.values)
+auc
+```
+
+#LOGISTIC REGRESSION USING ONLY FULL_TIME_POSITION, PREVAILING_WAGE AND OCCUPATION
+```{r}
+#Fitting the model on the training dataset
+h1bglm.train.fit =glm(CASE_STATUS~.-STATE, family=binomial(link = logit), data = data.train)
+
+#Finding Prdicitons on Testing set
+prediction=predict(h1bglm.train.fit, newdata=data.test, type="response")
+
+#Threshold
+pred_class = vector()
+pred_class[prediction<0.97]=0
+pred_class[prediction>=0.97]=1
+
+#confusion matrix
+confusionMatrix(pred_class, data.test$CASE_STATUS,positive="1")
+
+#ROC Curve
+pred = prediction(pred_class, data.test$CASE_STATUS)
+perf = performance(pred,"tpr","fpr")
+plot(perf)
+
+#Area Under the Curve
+auc.tmp = performance(pred,"auc");
+auc = as.numeric(auc.tmp@y.values)
+auc
+```
+
+#DECISION TREE USING ALL PREDICTORS AND THRESHOLD 0.97
+```{r}
+ctree1=ctree(CASE_STATUS~., data=data.train)
+probabilities = 1-unlist(treeresponse(ctree1,newdata=data.test), use.names=F)[seq(1,nrow(data.test)*2,2)]
+
+probabilities[probabilities<0.97]=0
+probabilities[probabilities>=0.97]=1
+
+confusionMatrix(probabilities, data.test$CASE_STATUS,positive="1")
+
+#ROC CURVE
+pred1 = prediction( probabilities, data.test$CASE_STATUS)
+perf1 = performance(pred1,"tpr","fpr")
+plot(perf1)
+
+#AREA Under the Curve
+auc.tmp1 = performance(pred1,"auc");
+auc1 = as.numeric(auc.tmp1@y.values)
+auc1
+```
+#DECISION TREE USING ALL PREDICTORS AND THRESHOLD 0.5
+```{r}
+ctree1=ctree(CASE_STATUS~., data=data.train)
+probabilities = 1-unlist(treeresponse(ctree1,newdata=data.test), use.names=F)[seq(1,nrow(data.test)*2,2)]
+
+probabilities[probabilities<0.5]=0
+probabilities[probabilities>=0.5]=1
+
+confusionMatrix(probabilities, data.test$CASE_STATUS,positive="1")
+
+#ROC CURVE
+pred1 = prediction( probabilities, data.test$CASE_STATUS)
+perf1 = performance(pred1,"tpr","fpr")
+plot(perf1)
+
+#AREA Under the Curve
+auc.tmp1 = performance(pred1,"auc");
+auc1 = as.numeric(auc.tmp1@y.values)
+auc1
+```
+
+
+#DECISION TREE USING ONLY FULL_TIME_POSITION AND PREVAILING_WAGE
+```{r}
+ctree1=ctree(CASE_STATUS~.-STATE-occ, data=data.train)
+probabilities = 1-unlist(treeresponse(ctree1,newdata=data.test), use.names=F)[seq(1,nrow(data.test)*2,2)]
+
+probabilities[probabilities<0.97]=0
+probabilities[probabilities>=0.97]=1
+
+confusionMatrix(probabilities, data.test$CASE_STATUS,positive="1")
+
+#ROC CURVE
+pred1 = prediction( probabilities, data.test$CASE_STATUS)
+perf1 = performance(pred1,"tpr","fpr")
+plot(perf1)
+
+#AREA Under the Curve
+auc.tmp1 = performance(pred1,"auc");
+auc1 = as.numeric(auc.tmp1@y.values)
+auc1
+```
+
+#DECISION TREE USING ONLY FULL_TIME_POSITION, PREVAILING_WAGE AND STATE
+```{r}
+ctree1=ctree(CASE_STATUS~.-occ, data=data.train)
+probabilities = 1-unlist(treeresponse(ctree1,newdata=data.test), use.names=F)[seq(1,nrow(data.test)*2,2)]
+
+probabilities[probabilities<0.97]=0
+probabilities[probabilities>=0.97]=1
+
+confusionMatrix(probabilities, data.test$CASE_STATUS,positive="1")
+
+#ROC CURVE
+pred1 = prediction( probabilities, data.test$CASE_STATUS)
+perf1 = performance(pred1,"tpr","fpr")
+plot(perf1)
+
+#AREA Under the Curve
+auc.tmp1 = performance(pred1,"auc");
+auc1 = as.numeric(auc.tmp1@y.values)
+auc1
+```
+
+#DECISION TREE USING ONLY FULL_TIME_POSITION, PREVAILING_WAGE AND OCCUPATION
+```{r}
+ctree1=ctree(CASE_STATUS~.-STATE, data=data.train)
+probabilities = 1-unlist(treeresponse(ctree1,newdata=data.test), use.names=F)[seq(1,nrow(data.test)*2,2)]
+
+probabilities[probabilities<0.97]=0
+probabilities[probabilities>=0.97]=1
+
+confusionMatrix(probabilities, data.test$CASE_STATUS,positive="1")
+
+#ROC CURVE
+pred1 = prediction( probabilities, data.test$CASE_STATUS)
+perf1 = performance(pred1,"tpr","fpr")
+plot(perf1)
+
+#AREA Under the Curve
+auc.tmp1 = performance(pred1,"auc");
+auc1 = as.numeric(auc.tmp1@y.values)
+auc1
+```
+
